@@ -1,0 +1,449 @@
+.warmup-session-container {
+    width: 100vw;
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 45% 55%;
+    position: relative;
+    overflow: hidden;
+    font-family: 'Nunito', 'Comic Sans MS', 'Arial', sans-serif;
+    background: linear-gradient(135deg, #FFB6D9 0%, #B490F5 50%, #8EECFF 100%);
+}
+
+.warmup-background {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    pointer-events: none;
+}
+
+.warmup-background img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0.4;
+}
+
+/* Floating decorative elements */
+.warmup-session-container::before,
+.warmup-session-container::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.warmup-session-container::before {
+    width: 300px;
+    height: 300px;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.3), transparent);
+    top: -100px;
+    right: -100px;
+    animation: float 8s ease-in-out infinite;
+}
+
+.warmup-session-container::after {
+    width: 200px;
+    height: 200px;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.2), transparent);
+    bottom: -50px;
+    left: 10%;
+    animation: float 6s ease-in-out infinite reverse;
+}
+
+@keyframes float {
+
+    0%,
+    100% {
+        transform: translateY(0px);
+    }
+
+    50% {
+        transform: translateY(-20px);
+    }
+}
+
+/* --------------------------------------------------------- */
+/* EXISTING LAYOUT STYLES (Camera & Right Panel)             */
+/* --------------------------------------------------------- */
+
+.camera-widget {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.camera-frame {
+    width: 100%;
+    max-width: 640px;
+    aspect-ratio: 4/3;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 24px;
+    overflow: hidden;
+    position: relative;
+    border: 4px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+    /* This ensures the Part A/B content stays inside the rounded corners */
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.camera-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.camera-placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #E1E1E1;
+    color: #999;
+    font-size: 3rem;
+}
+
+.camera-controls {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 15px;
+    z-index: 20;
+}
+
+.camera-control-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(255, 255, 255, 0.9);
+    color: #333;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+.word-display-container {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 100;
+    text-align: center;
+    pointer-events: none;
+}
+
+.word-display {
+    padding: 15px 30px;
+    border-radius: 50px;
+    color: white;
+    font-weight: 800;
+    font-size: 2rem;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* Right Side Content */
+.warmup-main-content {
+    z-index: 10;
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+}
+
+.welcome-title {
+    font-size: 3.5rem;
+    font-weight: 800;
+    color: #FFF;
+    text-shadow: 2px 2px 0px rgba(0, 0, 0, 0.1);
+    margin-bottom: 10px;
+}
+
+.start-btn,
+.skip-btn {
+    padding: 15px 40px;
+    font-size: 1.2rem;
+    font-weight: bold;
+    border: none;
+    border-radius: 50px;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+    margin-top: 20px;
+}
+
+.start-btn {
+    background: #FFF;
+    color: #B490F5;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.start-btn:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+}
+
+/* Status Indicators */
+.active-container {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 15px 25px;
+    border-radius: 20px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.status-text {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: #333;
+    margin: 0;
+}
+
+/* Listening Pulse Animation */
+.listening-indicator {
+    position: relative;
+    width: 20px;
+    height: 20px;
+    background: #FF4081;
+    border-radius: 50%;
+}
+
+.pulse-ring {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 2px solid #FF4081;
+    animation: pulse 2s infinite;
+    opacity: 0;
+}
+
+.pulse-ring.delay-1 {
+    animation-delay: 0.5s;
+}
+
+.pulse-ring.delay-2 {
+    animation-delay: 1s;
+}
+
+@keyframes pulse {
+    0% {
+        width: 100%;
+        height: 100%;
+        opacity: 0.8;
+    }
+
+    100% {
+        width: 300%;
+        height: 300%;
+        opacity: 0;
+    }
+}
+
+
+/* --------------------------------------------------------- */
+/* 🆕 NEW STYLES FOR PART A & PART B (Verbal Challenges)     */
+/* --------------------------------------------------------- */
+
+.verbal-challenge-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(to bottom, #E3F2FD, #BBDEFB);
+    /* Light Blue background for contrast */
+    animation: fadeIn 0.5s ease-in-out;
+    padding: 20px;
+    box-sizing: border-box;
+    text-align: center;
+    color: #333;
+}
+
+/* Snowfall overlay - positioned inside .verbal-challenge-container */
+.verbal-challenge-container {
+    position: relative;
+}
+
+.snowfall-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 5;
+    /* above background but below main content */
+    opacity: 0.9;
+    background-image:
+        radial-gradient(rgba(255, 255, 255, 0.9) 1px, rgba(255, 255, 255, 0) 1px),
+        radial-gradient(rgba(255, 255, 255, 0.8) 1px, rgba(255, 255, 255, 0) 1px);
+    background-size: 120px 120px, 200px 200px;
+    background-position: 0px 0px, 50px -100px;
+    animation: snowFall 10s linear infinite;
+    mix-blend-mode: screen;
+}
+
+@keyframes snowFall {
+    0% {
+        background-position: 0px -600px, 50px -300px;
+    }
+
+    100% {
+        background-position: 0px 0px, 50px 0px;
+    }
+}
+
+/* Part A: Snowball */
+.snowball-animation {
+    font-size: 5rem;
+    margin-bottom: 15px;
+    animation: bounce 2s infinite;
+    filter: drop-shadow(0 5px 5px rgba(0, 0, 0, 0.1));
+}
+
+/* Snowball image used in Part A */
+.snowball-img {
+    width: 120px;
+    height: 120px;
+    object-fit: contain;
+    margin-bottom: 15px;
+    animation: float 3s ease-in-out infinite;
+    filter: drop-shadow(0 6px 8px rgba(0, 0, 0, 0.12));
+}
+
+.big-sentence {
+    font-size: 2rem;
+    font-weight: 800;
+    background: #FFF;
+    padding: 20px 30px;
+    border-radius: 20px;
+    margin: 10px 0;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+    color: #333;
+    line-height: 1.4;
+}
+
+.highlight-word {
+    color: #E91E63;
+    /* Pink/Red for emphasis */
+    text-decoration: underline wavy #E91E63;
+    font-weight: 900;
+}
+
+.instruction-sub {
+    font-size: 1.2rem;
+    color: #555;
+    margin-top: 15px;
+    font-style: italic;
+}
+
+/* Part B: Quiz List */
+.quiz-title {
+    font-size: 1.8rem;
+    color: #1565C0;
+    margin-bottom: 20px;
+    font-weight: 800;
+}
+
+.sentence-list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    width: 90%;
+    max-width: 500px;
+}
+
+.sentence-item {
+    background: white;
+    padding: 15px 20px;
+    border-radius: 15px;
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    font-size: 1.3rem;
+    font-weight: 600;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
+
+    /* Animation Setup */
+    opacity: 0;
+    transform: translateX(-20px);
+    transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+    /* Bouncy transition */
+}
+
+.sentence-item.visible {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.number-badge {
+    width: 35px;
+    height: 35px;
+    background: #2196F3;
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    font-weight: bold;
+    flex-shrink: 0;
+    /* Prevents shrinking on small screens */
+}
+
+/* Animations */
+@keyframes bounce {
+
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+
+    50% {
+        transform: translateY(-15px);
+    }
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+/* Error State */
+.error-container {
+    background: rgba(255, 255, 255, 0.9);
+    padding: 20px;
+    border-radius: 15px;
+    text-align: center;
+}
+
+.error-message {
+    color: #D32F2F;
+    margin-bottom: 15px;
+}

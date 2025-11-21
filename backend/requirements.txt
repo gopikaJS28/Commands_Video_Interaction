@@ -1,0 +1,35 @@
+# Backend Python requirements for this project
+# Detected from `commands_backend/settings.py` and project files
+Django==5.2.8
+djangorestframework==3.16.1
+django-cors-headers==4.9.0
+
+# To install:
+# powershell: python -m pip install -r requirements.txt
+
+# Frontend (Node) dependencies for `frontend/commands_frontend`
+# Detected from `package.json` — listed here for convenience (not pip-installable)
+# To install frontend dependencies, run from the workspace root or the frontend folder:
+# powershell:
+#   cd frontend\commands_frontend
+#   npm install
+
+# dependencies:
+@mediapipe/camera_utils: ^0.3.1675466862
+@mediapipe/drawing_utils: ^0.3.1675466124
+@mediapipe/holistic: ^0.5.1675471629
+axios: ^1.13.2
+react: ^19.2.0
+react-dom: ^19.2.0
+react-webcam: ^7.2.0
+
+# devDependencies:
+@eslint/js: ^9.39.1
+@types/react: ^19.2.2
+@types/react-dom: ^19.2.2
+@vitejs/plugin-react: ^5.1.0
+eslint: ^9.39.1
+eslint-plugin-react-hooks: ^7.0.1
+eslint-plugin-react-refresh: ^0.4.24
+globals: ^16.5.0
+vite: ^7.2.2
