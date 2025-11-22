@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConversation } from '@elevenlabs/react';
 import './WarmUpSession.css';
+import VoiceAgentUI from '../VoiceAgentUI';
 
 import { HAND_CONNECTIONS } from '@mediapipe/hands';
 import { FaceDetection } from '@mediapipe/face_detection';
@@ -9,6 +10,7 @@ import { Holistic } from '@mediapipe/holistic';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
 import snowGif from '../../assets/snow_gif.gif';
 import snowballImg from '../../assets/Snowball.png';
+import commandsVideo from '../../assets/commands_video.mp4';
 
 // API Configuration
 const API_BASE_URL = 'http://localhost:8000';
@@ -31,7 +33,7 @@ const sendEventToBackend = async (eventType, data) => {
 const CommandsWarmUpSession = () => {
   const navigate = useNavigate();
   const [username, setUsername] = useState('');
-  const [status, setStatus] = useState('initializing');
+  const [status, setStatus] = useState('intro_video'); // Start directly with video
   const [errorMessage, setErrorMessage] = useState('');
 
   // Camera & UI State
@@ -64,6 +66,9 @@ const CommandsWarmUpSession = () => {
   const detectionStateRef = useRef({
     clapCount: 0,
     isProcessingClap: false,
+    prevWristDist: null,
+    lastClapTime: 0,
+
     noseTouchStreak: 0,
     lastNoseTouchAt: 0,
     waveCount: 0,
@@ -100,18 +105,31 @@ const CommandsWarmUpSession = () => {
   const conversation = useConversation({
     // Define tools for the Agent to control the UI
     clientTools: {
-      changeLessonPhase: ({ phase }) => {
+      changeLessonPhase: async ({ phase }) => {
         console.log(`🛠️ Tool Called: changeLessonPhase -> ${phase}`);
+
+        // Delay slightly to allow "Transition Speech" to play before switching UI
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
         if (phase === 'PART_A') {
           stopCamera(); // Turn off camera when moving to Snowball phase
         }
         // Reset visible sentences when changing phase (ensures PART_C starts with hidden sentences)
         setVisibleSentences(0);
         setLessonPhase(phase);
+        setCurrentCommand(null);
+
+        // Wait for UI to render/settle before Agent proceeds to next topic
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         return `Phase changed to ${phase}`;
       },
-      revealSentence: (params) => {
+      revealSentence: async (params) => {
         console.log(`🛠️ Tool Called: revealSentence with params:`, params);
+
+        // Small delay to sync with "One..." or "Two..." speech
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         // Handle the parameter name from ElevenLabs config
         let index = params?.sentenceNumber ?? params?.sentenceIndex ?? params?.index ?? 1;
         console.log(`📊 Extracted sentence number: ${index}`);
@@ -189,7 +207,8 @@ const CommandsWarmUpSession = () => {
   useEffect(() => {
     const storedUsername = sessionStorage.getItem('username') || 'Explorer';
     setUsername(storedUsername);
-    setStatus('ready');
+    // setStatus('ready'); // REMOVED: We start with 'intro_video' now
+    console.log("WarmUpSessionCommands mounted, status set to intro_video");
   }, []);
 
   // --- SAFETY NET: Auto-reveal if AI fails ---
@@ -305,8 +324,15 @@ const CommandsWarmUpSession = () => {
       if (activeCommand === 'CLAP') {
         const leftWrist = landmarks[15];
         const rightWrist = landmarks[16];
-        const dist = Math.hypot(leftWrist.x - rightWrist.x, leftWrist.y - rightWrist.y);
-        if (dist < 0.15 && !state.isProcessingClap) {
+        const leftIndex = landmarks[19];
+        const rightIndex = landmarks[20];
+
+        // Check distance between wrists OR index fingers (allows for "high five" style claps)
+        const wristDist = Math.hypot(leftWrist.x - rightWrist.x, leftWrist.y - rightWrist.y);
+        const indexDist = Math.hypot(leftIndex.x - rightIndex.x, leftIndex.y - rightIndex.y);
+
+        // Relaxed threshold: 0.25
+        if ((wristDist < 0.25 || indexDist < 0.25) && !state.isProcessingClap) {
           state.isProcessingClap = true;
           state.clapCount += 1;
           if (state.clapCount >= 2) handleCommandSuccess('CLAP');
@@ -316,17 +342,31 @@ const CommandsWarmUpSession = () => {
 
       // 3. NOSE TOUCH
       if (activeCommand === 'NOSE_TOUCH' && results.faceLandmarks) {
-        const faceNose = results.faceLandmarks[1];
+        // Define full nose structure points (Tip, Bridge, Sides, etc.)
+        const noseIndices = [1, 4, 5, 6, 197, 195];
+        const nosePoints = noseIndices.map(idx => results.faceLandmarks[idx]).filter(p => p);
+
         const leftHand = results.leftHandLandmarks;
         const rightHand = results.rightHandLandmarks;
+
         const checkTouch = (hand) => {
           if (!hand) return false;
-          const index = hand[8];
-          return Math.hypot(index.x - faceNose.x, index.y - faceNose.y) < 0.08;
+          // Check ALL fingertips: Thumb(4), Index(8), Middle(12), Ring(16), Pinky(20)
+          const fingerTips = [4, 8, 12, 16, 20].map(idx => hand[idx]);
+
+          // Check if ANY fingertip is close to ANY nose point
+          return fingerTips.some(tip => {
+            return nosePoints.some(nose => {
+              const dist = Math.hypot(tip.x - nose.x, tip.y - nose.y);
+              return dist < 0.15; // Threshold
+            });
+          });
         }
+
         if (checkTouch(leftHand) || checkTouch(rightHand)) {
           state.noseTouchStreak++;
           const now = Date.now();
+          // Require streak of 3 frames to avoid accidental triggers
           if (state.noseTouchStreak >= 3 && now - state.lastNoseTouchAt > 1500) {
             state.lastNoseTouchAt = now;
             handleCommandSuccess('NOSE_TOUCH');
@@ -380,6 +420,14 @@ const CommandsWarmUpSession = () => {
 
   }, [handleCommandSuccess, handleFaceAbsent, handleFaceReturned]);
 
+  // --- NEW: INTRO VIDEO HANDLERS ---
+  const handleStartClick = () => {
+    setStatus('intro_video');
+  };
+
+  const handleVideoEnd = () => {
+    startCameraAndConversation();
+  };
 
   // --- 5. START SESSION (FIXED WITH DELAY) ---
   const startCameraAndConversation = async () => {
@@ -422,6 +470,21 @@ For every question or command, you allow exactly **TWO attempts**:
 ## AVAILABLE TOOLS:
 1. **changeLessonPhase** - Call with: phase='WARMUP', 'PART_A', 'PART_B', or 'PART_C'
 2. **revealSentence** - Call with: sentenceNumber=1 (for sentence 1), sentenceNumber=2 (for sentence 2), or sentenceNumber=3 (for sentence 3)
+3. **endCall** - Call this ONLY when the lesson is totally finished.
+
+## PHASE 0: INTRODUCTION (Setting the Scene)
+**Current Phase:** INTRO
+
+- **Goal:** Introduce yourself and explain the activity.
+- **Say:** "Hi there, Explorer! I am Blizz, your energetic AI friend! Today we are going to learn all about **COMMANDS** and **BOSSY VERBS**! We are going to do a wiggle workout, throw some snowballs, and take a fun quiz. Are you ready to get moving?"
+- **Wait for response.**
+
+**HANDLING RESPONSES:**
+- **IF POSITIVE/READY:** - Say: "Awesome! Let's start with the Wiggle Workout!" 
+  - **GO TO PHASE 1**
+
+- **IF NEGATIVE/HESITANT (e.g., "No", "I'm tired"):** - Say: "Aww, don't worry! I promise it will be super fun and easy. We'll do it together! Let's just try the first move!" 
+  - **GO TO PHASE 1**
 
 ---
 
@@ -525,9 +588,13 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
 
 3. **Follow-Up (Bossy Verb):**
    - Say: "Now tell me the bossy verb in that command."
-   - **CORRECT ("Stop"):** Say: "Exactly! 'Stop' is the bossy verb! You did amazing today! [LESSON_COMPLETE]"
+   - **CORRECT ("Stop"):** Say: "Exactly! 'Stop' is the bossy verb! You did amazing today! Thanks for playing, bye bye!"
    - **WRONG (1st):** Say: "Try again… which word is the action word at the very beginning?"
-   - **WRONG (2nd):** Say: "The bossy verb is STOP. You did great today! [LESSON_COMPLETE]"
+   - **WRONG (2nd):** Say: "The bossy verb is STOP. You did great today! Thanks for playing, bye bye!"
+
+4. **TERMINATION:**
+   - Only now that the user has finished Phase 4, trigger: `[LESSON_COMPLETE]`
+   - CALL TOOL: "endCall()"
 `,
               firstMessage: `Hi ${username}! I'm Blizz! Are you ready to play?`
             }
@@ -574,179 +641,182 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
       <div
         className="warmup-background"
         style={{
-          backgroundColor: '#0d0436ff',
-          backgroundImage: `url(${snowGif})`,
+          backgroundColor: '#4aa0e7ff',
+          backgroundImage: `linear-gradient(to bottom, rgba(74,160,231,1), rgba(255,255,255,1)), url(${snowGif})`,
           backgroundSize: 'cover',
           backgroundPosition: 'center',
-          backgroundRepeat: 'no-repeat'
+          backgroundRepeat: 'no-repeat',
+          backgroundBlendMode: 'overlay'
         }}
         aria-hidden="true"
       />
 
-      <div className="camera-widget">
-        <div className="camera-frame">
+      {status !== 'intro_video' && (
+        <div className="camera-widget">
+          <div className="camera-frame">
 
-          {/* PHASE 1: WARMUP (Camera On) */}
-          {lessonPhase === 'WARMUP' && isCameraOn && (
-            <>
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="camera-video"
-                style={{ transform: 'scaleX(-1)' }}
-              />
-              <canvas
-                ref={canvasRef}
-                width="640"
-                height="480"
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  transform: 'scaleX(-1)'
-                }}
-              />
-            </>
-          )}
-
-          {/* PHASE 2: PART_A (Snowball) */}
-          {lessonPhase === 'PART_A' && (
-            <div className="verbal-challenge-container">
-              {/* Snowfall overlay (animated) */}
-              <div className="snowfall-overlay" aria-hidden="true" />
-              {/* Snowball image */}
-              <img src={snowballImg} alt="Snowball" className="snowball-img" />
-              <h1 className="big-sentence">
-                <span className="highlight-word">Throw</span> the snowball high.
-              </h1>
-              <p className="instruction-sub">Say the <b>Bossy Verb</b> out loud!</p>
-            </div>
-          )}
-
-          {/* PHASE 3: PART_B (Quiz) */}
-          {lessonPhase === 'PART_B' && (
-            <div className="verbal-challenge-container" style={{ minHeight: '400px' }}> {/* Force container height */}
-              <h2 className="quiz-title">Which one is a COMMAND?</h2>
-
-              <div className="sentence-list" style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
-
-                {/* SENTENCE 1 */}
-                <div
-                  className="sentence-item"
+            {/* PHASE 1: WARMUP (Camera On) */}
+            {lessonPhase === 'WARMUP' && isCameraOn && (
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="camera-video"
+                  style={{ transform: 'scaleX(-1)' }}
+                />
+                <canvas
+                  ref={canvasRef}
+                  width="640"
+                  height="480"
                   style={{
-                    display: 'flex', // Force layout so it takes space
-                    alignItems: 'center',
-                    gap: '15px',
-                    padding: '15px',
-                    borderRadius: '12px',
-                    background: 'rgba(255, 255, 255, 0.9)', // White background for readability
-                    opacity: visibleSentences >= 1 ? 1 : 0, // Fade in
-                    transition: 'opacity 0.5s ease',
-                    transform: visibleSentences >= 1 ? 'translateY(0)' : 'translateY(10px)', // Slight slide-up effect
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    transform: 'scaleX(-1)'
                   }}
-                >
-                  <span className="number-badge" style={{
-                    background: '#FF5722', color: 'white',
-                    width: '35px', height: '35px', display: 'flex',
-                    alignItems: 'center', justifyContent: 'center',
-                    borderRadius: '50%', fontWeight: 'bold'
-                  }}>1</span>
-                  <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>The flowers are very colourful.</p>
-                </div>
+                />
+              </>
+            )}
 
-                {/* SENTENCE 2 */}
-                <div
-                  className="sentence-item"
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '15px',
-                    padding: '15px',
-                    borderRadius: '12px',
-                    background: 'rgba(255, 255, 255, 0.9)',
-                    opacity: visibleSentences >= 2 ? 1 : 0,
-                    transition: 'opacity 0.5s ease',
-                    transform: visibleSentences >= 2 ? 'translateY(0)' : 'translateY(10px)',
-                  }}
-                >
-                  <span className="number-badge" style={{
-                    background: '#FF5722', color: 'white',
-                    width: '35px', height: '35px', display: 'flex',
-                    alignItems: 'center', justifyContent: 'center',
-                    borderRadius: '50%', fontWeight: 'bold'
-                  }}>2</span>
-                  <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>Can you water the flowers?</p>
-                </div>
-
-                {/* SENTENCE 3 */}
-                <div
-                  className="sentence-item"
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '15px',
-                    padding: '15px',
-                    borderRadius: '12px',
-                    background: 'rgba(255, 255, 255, 0.9)',
-                    opacity: visibleSentences >= 3 ? 1 : 0,
-                    transition: 'opacity 0.5s ease',
-                    transform: visibleSentences >= 3 ? 'translateY(0)' : 'translateY(10px)',
-                  }}
-                >
-                  <span className="number-badge" style={{
-                    background: '#FF5722', color: 'white',
-                    width: '35px', height: '35px', display: 'flex',
-                    alignItems: 'center', justifyContent: 'center',
-                    borderRadius: '50%', fontWeight: 'bold'
-                  }}>3</span>
-                  <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>Pick a flower for me.</p>
-                </div>
-
+            {/* PHASE 2: PART_A (Snowball) */}
+            {lessonPhase === 'PART_A' && (
+              <div className="verbal-challenge-container">
+                {/* Snowfall overlay (animated) */}
+                <div className="snowfall-overlay" aria-hidden="true" />
+                {/* Snowball image */}
+                <img src={snowballImg} alt="Snowball" className="snowball-img" />
+                <h1 className="big-sentence">
+                  <span className="highlight-word">Throw</span> the snowball high.
+                </h1>
+                <p className="instruction-sub">Say the <b>Bossy Verb</b> out loud!</p>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* PHASE 4: PART_C (Missing Punctuation) */}
-          {lessonPhase === 'PART_C' && (
-            <div className="verbal-challenge-container" style={{ minHeight: '400px' }}>
-              <div className="snowball-animation">❄️</div>
-              <h2 className="quiz-title">Where did the punctuation go?</h2>
-              <p className="instruction-sub">Find the COMMAND!</p>
-              <div className="sentence-list" style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
-                {['will you help your friend', 'stop right there', 'the sky is turning grey'].map((text, i) => (
-                  <div key={i} className="sentence-item"
+            {/* PHASE 3: PART_B (Quiz) */}
+            {lessonPhase === 'PART_B' && (
+              <div className="verbal-challenge-container" style={{ minHeight: '400px' }}> {/* Force container height */}
+                <h2 className="quiz-title">Which one is a COMMAND?</h2>
+
+                <div className="sentence-list" style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
+
+                  {/* SENTENCE 1 */}
+                  <div
+                    className="sentence-item"
                     style={{
-                      display: 'flex', alignItems: 'center', gap: '15px', padding: '15px', borderRadius: '12px', background: 'rgba(255, 255, 255, 0.95)',
-                      opacity: visibleSentences >= i + 1 ? 1 : 0,
-                      transform: visibleSentences >= i + 1 ? 'translateY(0)' : 'translateY(10px)',
-                      transition: 'all 0.5s ease'
-                    }}>
-                    <span className="number-badge" style={{ background: '#2196F3', color: 'white', width: '35px', height: '35px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%', fontWeight: 'bold' }}>{i + 1}</span>
-                    <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500', fontFamily: 'monospace' }}>{text}</p>
+                      display: 'flex', // Force layout so it takes space
+                      alignItems: 'center',
+                      gap: '15px',
+                      padding: '15px',
+                      borderRadius: '12px',
+                      background: 'rgba(255, 255, 255, 0.9)', // White background for readability
+                      opacity: visibleSentences >= 1 ? 1 : 0, // Fade in
+                      transition: 'opacity 0.5s ease',
+                      transform: visibleSentences >= 1 ? 'translateY(0)' : 'translateY(10px)', // Slight slide-up effect
+                    }}
+                  >
+                    <span className="number-badge" style={{
+                      background: '#FF5722', color: 'white',
+                      width: '35px', height: '35px', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      borderRadius: '50%', fontWeight: 'bold'
+                    }}>1</span>
+                    <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>The flowers are very colourful.</p>
                   </div>
-                ))}
+
+                  {/* SENTENCE 2 */}
+                  <div
+                    className="sentence-item"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '15px',
+                      padding: '15px',
+                      borderRadius: '12px',
+                      background: 'rgba(255, 255, 255, 0.9)',
+                      opacity: visibleSentences >= 2 ? 1 : 0,
+                      transition: 'opacity 0.5s ease',
+                      transform: visibleSentences >= 2 ? 'translateY(0)' : 'translateY(10px)',
+                    }}
+                  >
+                    <span className="number-badge" style={{
+                      background: '#FF5722', color: 'white',
+                      width: '35px', height: '35px', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      borderRadius: '50%', fontWeight: 'bold'
+                    }}>2</span>
+                    <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>Can you water the flowers?</p>
+                  </div>
+
+                  {/* SENTENCE 3 */}
+                  <div
+                    className="sentence-item"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '15px',
+                      padding: '15px',
+                      borderRadius: '12px',
+                      background: 'rgba(255, 255, 255, 0.9)',
+                      opacity: visibleSentences >= 3 ? 1 : 0,
+                      transition: 'opacity 0.5s ease',
+                      transform: visibleSentences >= 3 ? 'translateY(0)' : 'translateY(10px)',
+                    }}
+                  >
+                    <span className="number-badge" style={{
+                      background: '#FF5722', color: 'white',
+                      width: '35px', height: '35px', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      borderRadius: '50%', fontWeight: 'bold'
+                    }}>3</span>
+                    <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>Pick a flower for me.</p>
+                  </div>
+
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Camera Off Placeholder */}
-          {lessonPhase === 'WARMUP' && !isCameraOn && (
-            <div className="camera-placeholder"><div className="camera-icon">📹</div></div>
-          )}
+            {/* PHASE 4: PART_C (Missing Punctuation) */}
+            {lessonPhase === 'PART_C' && (
+              <div className="verbal-challenge-container" style={{ minHeight: '400px' }}>
+                <div className="snowball-animation">❄️</div>
 
-          {/* Feedback Overlays */}
-          {commandCompleted && <div className="feedback-overlay success">✅ Great Job!</div>}
-          {faceAbsent && lessonPhase === 'WARMUP' && <div className="feedback-overlay warning">😶 Where did you go?</div>}
+                <p className="instruction-sub">Find the COMMAND!</p>
+                <div className="sentence-list" style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
+                  {['will you help your friend', 'stop right there', 'the sky is turning grey'].map((text, i) => (
+                    <div key={i} className="sentence-item"
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '15px', padding: '15px', borderRadius: '12px', background: 'rgba(255, 255, 255, 0.95)',
+                        opacity: visibleSentences >= i + 1 ? 1 : 0,
+                        transform: visibleSentences >= i + 1 ? 'translateY(0)' : 'translateY(10px)',
+                        transition: 'all 0.5s ease'
+                      }}>
+                      <span className="number-badge" style={{ background: '#2196F3', color: 'white', width: '35px', height: '35px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%', fontWeight: 'bold' }}>{i + 1}</span>
+                      <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500', fontFamily: 'monospace' }}>{text}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
+            {/* Camera Off Placeholder */}
+            {lessonPhase === 'WARMUP' && !isCameraOn && (
+              <div className="camera-placeholder"><div className="camera-icon">📹</div></div>
+            )}
+
+            {/* Feedback Overlays */}
+            {commandCompleted && <div className="feedback-overlay success">✅ Great Job!</div>}
+            {faceAbsent && lessonPhase === 'WARMUP' && <div className="feedback-overlay warning">😶 Where did you go?</div>}
+
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Command text at bottom (Only for Warmup) */}
-      {currentCommand && (
+      {currentCommand && lessonPhase === 'WARMUP' && (
         <div className="word-display-container">
           <div className="word-display" style={{ backgroundColor: commandCompleted ? '#4CAF50' : '#2196F3' }}>
             {currentCommand}
@@ -760,19 +830,72 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
         {status === 'ready' && (
           <>
             <h1 className="welcome-title">Welcome, {username}!</h1>
-            <button onClick={startCameraAndConversation} className="start-btn">Start</button>
+            <button onClick={handleStartClick} className="start-btn">Start</button>
           </>
         )}
-        {status === 'initializing' && <div className="status-container"><div className="spinner"></div><p>Getting things ready...</p></div>}
-        {status === 'active' && (
-          <div className="active-container">
-            <div className="listening-indicator">
-              <div className="pulse-ring"></div>
-            </div>
-            <p className="status-text">{isSpeaking ? '🗣️ Blizz is speaking...' : '👂 Listening...'}</p>
+
+        {status === 'intro_video' && (
+          <div className="video-wrapper" style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            width: '100vw',
+            height: '100vh',
+            backgroundColor: '#000',
+            zIndex: 9999,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center'
+          }}>
+            <video
+              src={commandsVideo}
+              autoPlay
+              controls={false}
+              onEnded={handleVideoEnd}
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            />
+            <button
+              onClick={handleVideoEnd}
+              style={{
+                position: 'absolute',
+                bottom: '40px',
+                right: '40px',
+                padding: '15px 40px',
+                background: 'rgba(255, 255, 255, 0.2)',
+                color: 'white',
+                border: '2px solid rgba(255, 255, 255, 0.5)',
+                borderRadius: '50px',
+                cursor: 'pointer',
+                fontSize: '1.2rem',
+                fontWeight: 'bold',
+                backdropFilter: 'blur(10px)',
+                transition: 'all 0.3s ease',
+                boxShadow: '0 4px 15px rgba(0,0,0,0.3)'
+              }}
+              onMouseOver={(e) => {
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.4)';
+                e.currentTarget.style.transform = 'scale(1.05)';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.2)';
+                e.currentTarget.style.transform = 'scale(1)';
+              }}
+            >
+              Skip Video ⏭️
+            </button>
           </div>
         )}
+
+        {status === 'initializing' && <div className="status-container"><div className="spinner"></div><p>Getting things ready...</p></div>}
+
+        {status === 'active' && (
+          <div className="active-container">
+            <VoiceAgentUI isSpeaking={isSpeaking} />
+          </div>
+        )}
+
         {status === 'completed' && <div className="status-container"><p>🎉 Lesson Complete!</p></div>}
+
         {status === 'error' && <div className="error-container"><p>{errorMessage}</p><button onClick={skipSession} className="skip-btn">Skip</button></div>}
       </div>
     </div>

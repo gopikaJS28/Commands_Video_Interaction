@@ -1,0 +1,174 @@
+/* VoiceAgentUI.css */
+.voice-agent-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    position: relative;
+    width: 300px;
+    /* Increased from 220px */
+    height: 300px;
+    /* Increased from 220px */
+    /* No background on the container itself to let it float */
+}
+
+/* Main Orb Container */
+.agent-orb {
+    width: 130px;
+    /* Increased from 90px */
+    height: 130px;
+    /* Increased from 90px */
+    border-radius: 50%;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    backdrop-filter: blur(10px);
+}
+
+/* --- LISTENING STATE (Ethereal/Siri-like) --- */
+.agent-orb.listening {
+    /* Multi-color gradient that feels "intelligent" */
+    background: radial-gradient(circle at center, rgba(255, 255, 255, 0.9) 0%, rgba(66, 135, 245, 0.6) 40%, rgba(138, 43, 226, 0.6) 100%);
+    box-shadow:
+        0 0 40px rgba(66, 135, 245, 0.5),
+        0 0 70px rgba(138, 43, 226, 0.3),
+        inset 0 0 25px rgba(255, 255, 255, 0.8);
+    animation: floatAndGlow 4s ease-in-out infinite;
+}
+
+/* Rotating ring for listening */
+.agent-orb.listening::before {
+    content: '';
+    position: absolute;
+    top: -8px;
+    left: -8px;
+    right: -8px;
+    bottom: -8px;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, transparent, rgba(0, 255, 255, 0.6), transparent, rgba(255, 0, 255, 0.6), transparent);
+    animation: spinRing 4s linear infinite;
+    filter: blur(10px);
+    z-index: -1;
+}
+
+/* --- SPEAKING STATE (Active/Energetic) --- */
+.agent-orb.speaking {
+    /* Warm, energetic gradient for speaking */
+    background: radial-gradient(circle at center, #fff 10%, #ff9a9e 40%, #ff6a00 100%);
+    box-shadow:
+        0 0 50px rgba(255, 106, 0, 0.6),
+        0 0 90px rgba(255, 75, 31, 0.4);
+    animation: speakPulse 1.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) infinite alternate;
+}
+
+/* Shockwaves for speaking */
+.ripple {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.6);
+    box-shadow: 0 0 15px rgba(255, 255, 255, 0.3);
+    opacity: 0;
+    z-index: -2;
+    animation: shockwave 2s infinite cubic-bezier(0, 0.2, 0.8, 1);
+}
+
+.ripple:nth-child(1) {
+    animation-delay: 0s;
+}
+
+.ripple:nth-child(2) {
+    animation-delay: 0.6s;
+}
+
+.ripple:nth-child(3) {
+    animation-delay: 1.2s;
+}
+
+/* Status Text - Minimal & Clean */
+.agent-status-text {
+    margin-top: 30px;
+    font-family: 'Outfit', 'Inter', sans-serif;
+    /* Use a modern font if available */
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: #ffffff;
+    /* White text looks premium on colored backgrounds */
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    /* Drop shadow for readability */
+    font-size: 1.4rem;
+    /* Increased from 1.1rem */
+    text-align: center;
+    /* Removed background color completely */
+    animation: fadeInUp 0.6s ease-out;
+}
+
+/* --- ANIMATIONS --- */
+@keyframes floatAndGlow {
+
+    0%,
+    100% {
+        transform: translateY(0) scale(1);
+        box-shadow: 0 0 30px rgba(66, 135, 245, 0.5);
+    }
+
+    50% {
+        transform: translateY(-10px) scale(1.05);
+        box-shadow: 0 0 50px rgba(138, 43, 226, 0.6);
+    }
+}
+
+@keyframes spinRing {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes speakPulse {
+    0% {
+        transform: scale(1);
+        filter: brightness(1);
+    }
+
+    100% {
+        transform: scale(1.15);
+        filter: brightness(1.2);
+    }
+}
+
+@keyframes shockwave {
+    0% {
+        width: 100%;
+        height: 100%;
+        opacity: 0.8;
+        border-width: 3px;
+    }
+
+    100% {
+        width: 250%;
+        height: 250%;
+        opacity: 0;
+        border-width: 0px;
+    }
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
