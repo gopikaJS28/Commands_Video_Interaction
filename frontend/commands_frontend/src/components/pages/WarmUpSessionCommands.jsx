@@ -5,11 +5,11 @@ import './WarmUpSession.css';
 import VoiceAgentUI from '../VoiceAgentUI';
 
 import { HAND_CONNECTIONS } from '@mediapipe/hands';
-import { FaceDetection } from '@mediapipe/face_detection';
 import { Holistic } from '@mediapipe/holistic';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
 import snowGif from '../../assets/snow_gif.gif';
 import snowballImg from '../../assets/Snowball.png';
+import snowBackground from '../../assets/Snow_background.png';
 import commandsVideo from '../../assets/commands_video.mp4';
 
 // API Configuration
@@ -32,24 +32,46 @@ const sendEventToBackend = async (eventType, data) => {
 
 const CommandsWarmUpSession = () => {
   const navigate = useNavigate();
-  const [username, setUsername] = useState('');
+  // Hardcoded username for this mini project (keeps integration simple).
+  const HARDCODED_USERNAME = 'Amal';
+  const [username, setUsername] = useState(HARDCODED_USERNAME);
   const [status, setStatus] = useState('intro_video'); // Start directly with video
   const [errorMessage, setErrorMessage] = useState('');
 
   // Camera & UI State
   const [isCameraOn, setIsCameraOn] = useState(false);
+  const isCameraOnRef = useRef(false);
   const [isFinishing, setIsFinishing] = useState(false);
 
   // Game Logic State
   const [currentCommand, setCurrentCommand] = useState(null);
   const [commandCompleted, setCommandCompleted] = useState(false);
-  const [score, setScore] = useState(0);
   const [faceAbsent, setFaceAbsent] = useState(false);
 
   // --- PHASES & UI STATE ---
   // Phases: 'WARMUP' -> 'PART_A' -> 'PART_B' -> 'PART_C' -> 'COMPLETED'
   const [lessonPhase, setLessonPhase] = useState('WARMUP');
   const [visibleSentences, setVisibleSentences] = useState(0);
+
+  // Keep locally-updated sentence texts so we can mirror the agent's exact spoken transcript
+  const defaultPartB = [
+    'The flowers are very colourful.',
+    'Can you water the flowers?',
+    'Pick a flower for me.'
+  ];
+  const defaultPartC = [
+    'will you help your friend',
+    'stop right there',
+    'the sky is turning grey'
+  ];
+  const [partBSentences, setPartBSentences] = useState(defaultPartB);
+  const [partCSentences, setPartCSentences] = useState(defaultPartC);
+
+  // Track spoken reveals coming from the agent transcript so we can reveal them locally while it's speaking
+  const [spokenReveals, setSpokenReveals] = useState([]); // { phase, index, text, ts, shown }
+
+  // NEW: Store conversation messages so we can display agent transcript
+  const [conversationHistory, setConversationHistory] = useState([]);
 
   // Refs
   const activeCommandRef = useRef(null);
@@ -61,6 +83,9 @@ const CommandsWarmUpSession = () => {
   const holisticRef = useRef(null);
   const faceDetectionRef = useRef(null);
   const animationFrameRef = useRef(null);
+  const lastHandLogRef = useRef(0);
+  // Safety net timer ref (so we can cancel it from onMessage)
+  const safetyTimerRef = useRef(null);
 
   // Detection counters
   const detectionStateRef = useRef({
@@ -82,6 +107,7 @@ const CommandsWarmUpSession = () => {
 
   // --- 1. CAMERA CLEANUP ---
   const stopCamera = useCallback(() => {
+    isCameraOnRef.current = false;
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
@@ -94,12 +120,9 @@ const CommandsWarmUpSession = () => {
       holisticRef.current.close();
       holisticRef.current = null;
     }
-    if (faceDetectionRef.current) {
-      faceDetectionRef.current.close();
-      faceDetectionRef.current = null;
-    }
     setIsCameraOn(false);
   }, []);
+
 
   // --- 2. ELEVENLABS CONFIGURATION ---
   const conversation = useConversation({
@@ -135,15 +158,98 @@ const CommandsWarmUpSession = () => {
         console.log(`📊 Extracted sentence number: ${index}`);
         setVisibleSentences(Number(index));
         return `Sentence ${index} revealed`;
+      },
+      endCall: async () => {
+        console.log('🛠️ Tool Called: endCall');
+        await conversation.endSession();
+        return 'Call ended';
       }
     },
     onConnect: () => console.log('✅ Connected to ElevenLabs'),
     onMessage: (message) => {
+      // Store message in history for transcript display
       let messageText = '';
-      if (message.message) messageText = message.message.toLowerCase();
-      else if (message.text) messageText = message.text.toLowerCase();
+      let messageSource = 'user'; // default
+
+      // Extract text from different message formats
+      if (message.message) { messageText = message.message; }
+      else if (message.text) { messageText = message.text; }
       else if (message.messages?.find(m => m.type === 'text')) {
-        messageText = message.messages.find(m => m.type === 'text').text.toLowerCase();
+        const m = message.messages.find(m => m.type === 'text');
+        messageText = m.text;
+      }
+
+      // Determine source (agent vs user)
+      if (message.source === 'ai' || message.source === 'agent' || message.role === 'assistant') {
+        messageSource = 'ai';
+      }
+
+      // Add to conversation history
+      if (messageText) {
+        setConversationHistory(prev => [...prev, { text: messageText, source: messageSource, ts: Date.now() }]);
+        console.log(`📨 Message (${messageSource}):`, messageText);
+      }
+
+      // Preserve the original/raw text and also a lower-cased version for matching
+      let messageRaw = messageText;
+      let messageTextLower = messageText.toLowerCase();
+
+      // --- SENTENCE REVEAL LOGIC (Pattern Matching) ---
+      // For the 3-option questions (PART_B / PART_C) we capture the exact spoken transcript
+      // and reveal the matching sentence locally while the agent is SPEAKING to avoid network/tool delay.
+      // Strict local reveal matching: immediately reveal matching sentences
+      // to avoid network/tool latency. We set visible sentences locally
+      // as soon as the speech transcript includes the expected substring.
+      // Helper: Check if text contains ANY of the given keywords (fuzzy substring match)
+      const matchesAny = (text, keywords) => keywords.some(k => text.includes(k));
+
+      if (lessonPhase === 'PART_B') {
+        if (matchesAny(messageText, ['flowers', 'colourful', 'colorful'])) {
+          // Clear safety timer (we've received the transcript we need)
+          if (safetyTimerRef.current) { clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null; }
+          setPartBSentences(prev => { const next = [...prev]; next[0] = messageRaw; return next; });
+          setSpokenReveals(prev => [...prev, { phase: 'PART_B', index: 1, text: messageRaw, ts: Date.now(), shown: true }]);
+          console.log('🟢 PART_B detected: sentence 1 -> reveal immediately');
+          setVisibleSentences(prev => Math.max(prev, 1));
+        }
+        if (matchesAny(messageText, ['water', 'flowers'])) {
+          if (safetyTimerRef.current) { clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null; }
+          setPartBSentences(prev => { const next = [...prev]; next[1] = messageRaw; return next; });
+          setSpokenReveals(prev => [...prev, { phase: 'PART_B', index: 2, text: messageRaw, ts: Date.now(), shown: true }]);
+          console.log('🟢 PART_B detected: sentence 2 -> reveal immediately');
+          setVisibleSentences(prev => Math.max(prev, 2));
+        }
+        if (matchesAny(messageText, ['pick', 'flower'])) {
+          if (safetyTimerRef.current) { clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null; }
+          setPartBSentences(prev => { const next = [...prev]; next[2] = messageRaw; return next; });
+          setSpokenReveals(prev => [...prev, { phase: 'PART_B', index: 3, text: messageRaw, ts: Date.now(), shown: true }]);
+          console.log('🟢 PART_B detected: sentence 3 -> reveal immediately');
+          setVisibleSentences(prev => Math.max(prev, 3));
+        }
+      }
+
+      if (lessonPhase === 'PART_C') {
+        if (matchesAny(messageText, ['help', 'friend'])) {
+          if (safetyTimerRef.current) { clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null; }
+          setPartCSentences(prev => { const next = [...prev]; next[0] = messageRaw; return next; });
+          setSpokenReveals(prev => [...prev, { phase: 'PART_C', index: 1, text: messageRaw, ts: Date.now(), shown: true }]);
+          console.log('🟢 PART_C detected: sentence 1 -> reveal immediately');
+          setVisibleSentences(prev => Math.max(prev, 1));
+        }
+        if (matchesAny(messageText, ['stop', 'right', 'there'])) {
+          if (safetyTimerRef.current) { clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null; }
+          setPartCSentences(prev => { const next = [...prev]; next[1] = messageRaw; return next; });
+          setSpokenReveals(prev => [...prev, { phase: 'PART_C', index: 2, text: messageRaw, ts: Date.now(), shown: true }]);
+          console.log('🟢 PART_C detected: sentence 2 -> reveal immediately');
+          setVisibleSentences(prev => Math.max(prev, 2));
+        }
+        if (matchesAny(messageText, ['sky', 'turning', 'grey', 'gray'])) {
+          if (safetyTimerRef.current) { clearTimeout(safetyTimerRef.current); safetyTimerRef.current = null; }
+          setPartCSentences(prev => { const next = [...prev]; next[2] = messageRaw; return next; });
+          setSpokenReveals(prev => [...prev, { phase: 'PART_C', index: 3, text: messageRaw, ts: Date.now(), shown: true }]);
+          console.log('🟢 PART_C detected: sentence 3 -> reveal immediately');
+          setVisibleSentences(prev => Math.max(prev, 3));
+        }
       }
 
       // --- PHYSICAL COMMAND DETECTION (Only in WARMUP) ---
@@ -203,36 +309,95 @@ const CommandsWarmUpSession = () => {
 
   const { status: convStatus, isSpeaking, startSession, endSession } = conversation;
 
+  // Extract latest AI message from conversation history
+  const latestAgentMessage = conversationHistory
+    .slice()
+    .reverse()
+    .find((msg) => msg.source === 'ai')?.text || '';
+
+  // If the agent is speaking, reveal any spokenReveals for the current phase locally
+  useEffect(() => {
+    if (!isSpeaking) return;
+    setSpokenReveals(prev => {
+      let changed = false;
+      const next = prev.map(item => {
+        if (!item.shown && item.phase === lessonPhase) {
+          changed = true;
+          setVisibleSentences(v => Math.max(v, item.index));
+          return { ...item, shown: true };
+        }
+        return item;
+      });
+      return changed ? next : prev;
+    });
+  }, [isSpeaking, lessonPhase]);
+
+  // When visibleSentences increases (for example via tool reveal), mark related spokenReveals as shown
+  useEffect(() => {
+    if (visibleSentences <= 0) return;
+    setSpokenReveals(prev => prev.map(item => {
+      if (!item.shown && item.phase === lessonPhase && item.index <= visibleSentences) {
+        return { ...item, shown: true };
+      }
+      return item;
+    }));
+  }, [visibleSentences, lessonPhase]);
+
   // --- 3. INITIALIZATION ---
   useEffect(() => {
-    const storedUsername = sessionStorage.getItem('username') || 'Explorer';
-    setUsername(storedUsername);
-    // setStatus('ready'); // REMOVED: We start with 'intro_video' now
-    console.log("WarmUpSessionCommands mounted, status set to intro_video");
+    // For this mini project we hardcode the student name to avoid integration issues.
+    setUsername(HARDCODED_USERNAME);
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('🎬 COMPONENT INITIALIZED');
+    console.log('  ✓ Hardcoded username:', HARDCODED_USERNAME);
+    console.log('  ✓ Initial status:', 'intro_video');
+    console.log('═══════════════════════════════════════════════════════════════');
   }, []);
 
   // --- SAFETY NET: Auto-reveal if AI fails ---
   useEffect(() => {
-    // If we are in PART_B OR PART_C but nothing is visible yet...
+    // Only run in PART_B or PART_C, and only if no sentences are visible
     if ((lessonPhase === 'PART_B' || lessonPhase === 'PART_C') && visibleSentences === 0) {
       console.log("⏳ Waiting for AI to reveal sentences...");
 
-      // Set a timer: If AI doesn't reveal sentence 1 within 5 seconds, show ALL.
-      const timer = setTimeout(() => {
-        console.log("⚠️ AI slow/failed to reveal. Forcing display of all sentences.");
-        setVisibleSentences(3); // Force show all
-      }, 5000);
+      // Clear any previous safety timer just in case
+      if (safetyTimerRef.current) {
+        clearTimeout(safetyTimerRef.current);
+        safetyTimerRef.current = null;
+      }
 
-      return () => clearTimeout(timer);
+      // Set a timer: If AI doesn't reveal sentence 1 within 10 seconds, show ALL.
+      safetyTimerRef.current = setTimeout(() => {
+        console.warn("⚠️ SAFETY NET TRIGGERED: Forcing display of all sentences in phase:", lessonPhase);
+        setVisibleSentences(3); // Force show all
+        safetyTimerRef.current = null;
+      }, 10000); // 10 seconds
+
+      return () => {
+        if (safetyTimerRef.current) {
+          clearTimeout(safetyTimerRef.current);
+          safetyTimerRef.current = null;
+        }
+      };
+    } else {
+      // If not in those phases or sentences are visible, clear any timer
+      if (safetyTimerRef.current) {
+        clearTimeout(safetyTimerRef.current);
+        safetyTimerRef.current = null;
+      }
     }
   }, [lessonPhase, visibleSentences]);
 
   // Handle Gesture Success
   const handleCommandSuccess = useCallback((commandType) => {
+    console.log('✅ handleCommandSuccess called for:', commandType);
     if (commandCompletedRef.current) return;
     commandCompletedRef.current = true;
     setCommandCompleted(true);
-    setScore(prev => prev + 10);
+
+    // Do not award score for the warmup physical gestures (they are practice)
+    const warmupGestures = ['WAVE', 'CLAP', 'NOSE_TOUCH', 'RAISE_HAND'];
+    // No scoring for now; warmup gestures shouldn't modify a visible score.
 
     const signals = {
       'WAVE': '[STUDENT_WAVED]',
@@ -251,7 +416,7 @@ const CommandsWarmUpSession = () => {
       setCommandCompleted(false);
       activeCommandRef.current = null;
     }, 2000);
-  }, [conversation]);
+  }, [conversation, lessonPhase]);
 
   // Face Absence Logic
   const handleFaceAbsent = useCallback((duration) => {
@@ -272,150 +437,208 @@ const CommandsWarmUpSession = () => {
   const initializeCamera = useCallback(async (stream) => {
     const video = videoRef.current;
     if (!video) return;
+
     video.srcObject = stream;
-    await video.play();
 
-    const holistic = new Holistic({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}` });
-    holistic.setOptions({ modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    // Wait for video metadata and first frame before initializing models
+    await new Promise((resolve) => {
+      video.onloadedmetadata = () => {
+        video.play().then(resolve).catch(() => resolve());
+      };
+    });
 
-    const faceDetection = new FaceDetection({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}` });
-    faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+    console.log('📷 Video Metadata loaded. Initializing Holistic Model...');
 
-    // Process Holistic Results (Hands/Pose)
+    // CRITICAL: Dynamically set canvas size to match video (common React bug: canvas starts 0x0)
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      console.log('🔧 Canvas resized to:', canvas.width, 'x', canvas.height);
+    }
+
+    // Initialize ONLY Holistic (includes face landmarks; removes need for separate FaceDetection)
+    const VERSION = '0.5.1675471629';
+    const holistic = new Holistic({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic@${VERSION}/${file}`
+    });
+
+    holistic.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    // Single model result handler
     holistic.onResults((results) => {
       const canvas = canvasRef.current;
-      if (!canvas || !results.poseLandmarks) return;
+      if (!canvas) return;
       const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // --- FACE ABSENCE DETECTION (using Holistic faceLandmarks) ---
+      const now = Date.now();
+      const state = detectionStateRef.current;
+      if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+        state.lastFaceDetectedTime = now;
+        if (state.isAbsent) {
+          state.isAbsent = false;
+          console.log('📹 Face returned');
+          handleFaceReturned();
+        }
+      } else if (now - state.lastFaceDetectedTime > 3000 && !state.isAbsent) {
+        state.isAbsent = true;
+        console.warn('📹 Face absent for 3s');
+        handleFaceAbsent(now - state.lastFaceDetectedTime);
+      }
+
+      // Debug header: which landmarks are present
+      console.debug('🛰️ Holistic.onResults:', {
+        pose: !!results.poseLandmarks,
+        leftHand: !!results.leftHandLandmarks,
+        rightHand: !!results.rightHandLandmarks,
+        face: !!results.faceLandmarks
+      });
+
+      // Throttled hand logging
+      try {
+        const nowLog = Date.now();
+        if (nowLog - lastHandLogRef.current > 500) {
+          lastHandLogRef.current = nowLog;
+          const left = results.leftHandLandmarks;
+          const right = results.rightHandLandmarks;
+          console.debug('🖐 Hands:', {
+            cmd: activeCommandRef.current,
+            leftCount: left ? left.length : 0,
+            rightCount: right ? right.length : 0
+          });
+        }
+      } catch (e) {
+        // silent
+      }
+
       ctx.save();
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const activeCommand = activeCommandRef.current;
-      const state = detectionStateRef.current;
+      const state2 = detectionStateRef.current;
       const landmarks = results.poseLandmarks;
 
-      // 1. WAVE
-      if (activeCommand === 'WAVE') {
-        const handLandmarks = results.rightHandLandmarks || results.leftHandLandmarks;
-        if (handLandmarks) {
-          drawConnectors(ctx, handLandmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
-          drawLandmarks(ctx, handLandmarks, { color: '#FF0000', lineWidth: 1, radius: 3 });
-          const wrist = handLandmarks[0];
-          const indexTip = handLandmarks[8];
-          const middleTip = handLandmarks[12];
-          if (indexTip && middleTip && indexTip.y < wrist.y) {
-            const now = Date.now();
-            if (!state.isWaving) {
-              state.isWaving = true;
-              state.waveStartTime = now;
-              state.waveCount = 1;
-            } else if (now - state.lastWaveTime > 200) {
-              state.waveCount++;
-              state.lastWaveTime = now;
-              if (state.waveCount >= 3) {
-                handleCommandSuccess('WAVE');
-                state.waveCount = 0;
+      if (landmarks) {
+        // 1. WAVE
+        if (activeCommand === 'WAVE') {
+          const handLandmarks = results.rightHandLandmarks || results.leftHandLandmarks;
+          if (handLandmarks) {
+            drawConnectors(ctx, handLandmarks, HAND_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
+            drawLandmarks(ctx, handLandmarks, { color: '#FF0000', lineWidth: 1, radius: 3 });
+            const wrist = handLandmarks[0];
+            const indexTip = handLandmarks[8];
+            const middleTip = handLandmarks[12];
+            if (indexTip && middleTip && wrist && indexTip.y < wrist.y) {
+              const now = Date.now();
+              if (!state2.isWaving) {
+                state2.isWaving = true;
+                state2.waveStartTime = now;
+                state2.waveCount = 1;
+              } else if (now - state2.lastWaveTime > 200) {
+                state2.waveCount++;
+                state2.lastWaveTime = now;
+                if (state2.waveCount >= 3) {
+                  handleCommandSuccess('WAVE');
+                  state2.waveCount = 0;
+                }
               }
+            }
+          }
+        }
+
+        // 2. CLAP
+        if (activeCommand === 'CLAP') {
+          const leftWrist = landmarks[15];
+          const rightWrist = landmarks[16];
+          const leftIndex = landmarks[19];
+          const rightIndex = landmarks[20];
+
+          if (leftWrist && rightWrist && leftIndex && rightIndex) {
+            const wristDist = Math.hypot(leftWrist.x - rightWrist.x, leftWrist.y - rightWrist.y);
+            const indexDist = Math.hypot(leftIndex.x - rightIndex.x, leftIndex.y - rightIndex.y);
+
+            if ((wristDist < 0.25 || indexDist < 0.25) && !state2.isProcessingClap) {
+              state2.isProcessingClap = true;
+              state2.clapCount += 1;
+              console.debug('👏 Clap count:', state2.clapCount);
+              if (state2.clapCount >= 2) handleCommandSuccess('CLAP');
+              setTimeout(() => { state2.isProcessingClap = false; }, 500);
+            }
+          }
+        }
+
+        // 3. NOSE TOUCH
+        if (activeCommand === 'NOSE_TOUCH' && results.faceLandmarks) {
+          const noseIndices = [1, 4, 5, 6, 197, 195];
+          const nosePoints = noseIndices.map(idx => results.faceLandmarks[idx]).filter(p => p);
+          const leftHand = results.leftHandLandmarks;
+          const rightHand = results.rightHandLandmarks;
+
+          const checkTouch = (hand) => {
+            if (!hand) return false;
+            const fingerTips = [4, 8, 12, 16, 20].map(idx => hand[idx]);
+            return fingerTips.some(tip => {
+              return nosePoints.some(nose => {
+                if (!tip || !nose) return false;
+                const dist = Math.hypot(tip.x - nose.x, tip.y - nose.y);
+                return dist < 0.20;
+              });
+            });
+          }
+
+          if (checkTouch(leftHand) || checkTouch(rightHand)) {
+            state2.noseTouchStreak++;
+            const now = Date.now();
+            if (state2.noseTouchStreak >= 3 && now - state2.lastNoseTouchAt > 1500) {
+              state2.lastNoseTouchAt = now;
+              handleCommandSuccess('NOSE_TOUCH');
+            }
+          } else {
+            state2.noseTouchStreak = 0;
+          }
+        }
+
+        // 4. RAISE HAND
+        if (activeCommand === 'RAISE_HAND') {
+          const nose = landmarks[0];
+          const leftWrist = landmarks[15];
+          const rightWrist = landmarks[16];
+          if (nose && leftWrist && rightWrist) {
+            if (leftWrist.y < nose.y || rightWrist.y < nose.y) {
+              handleCommandSuccess('RAISE_HAND');
             }
           }
         }
       }
 
-      // 2. CLAP
-      if (activeCommand === 'CLAP') {
-        const leftWrist = landmarks[15];
-        const rightWrist = landmarks[16];
-        const leftIndex = landmarks[19];
-        const rightIndex = landmarks[20];
-
-        // Check distance between wrists OR index fingers (allows for "high five" style claps)
-        const wristDist = Math.hypot(leftWrist.x - rightWrist.x, leftWrist.y - rightWrist.y);
-        const indexDist = Math.hypot(leftIndex.x - rightIndex.x, leftIndex.y - rightIndex.y);
-
-        // Relaxed threshold: 0.25
-        if ((wristDist < 0.25 || indexDist < 0.25) && !state.isProcessingClap) {
-          state.isProcessingClap = true;
-          state.clapCount += 1;
-          if (state.clapCount >= 2) handleCommandSuccess('CLAP');
-          setTimeout(() => { state.isProcessingClap = false; }, 500);
-        }
-      }
-
-      // 3. NOSE TOUCH
-      if (activeCommand === 'NOSE_TOUCH' && results.faceLandmarks) {
-        // Define full nose structure points (Tip, Bridge, Sides, etc.)
-        const noseIndices = [1, 4, 5, 6, 197, 195];
-        const nosePoints = noseIndices.map(idx => results.faceLandmarks[idx]).filter(p => p);
-
-        const leftHand = results.leftHandLandmarks;
-        const rightHand = results.rightHandLandmarks;
-
-        const checkTouch = (hand) => {
-          if (!hand) return false;
-          // Check ALL fingertips: Thumb(4), Index(8), Middle(12), Ring(16), Pinky(20)
-          const fingerTips = [4, 8, 12, 16, 20].map(idx => hand[idx]);
-
-          // Check if ANY fingertip is close to ANY nose point
-          return fingerTips.some(tip => {
-            return nosePoints.some(nose => {
-              const dist = Math.hypot(tip.x - nose.x, tip.y - nose.y);
-              return dist < 0.15; // Threshold
-            });
-          });
-        }
-
-        if (checkTouch(leftHand) || checkTouch(rightHand)) {
-          state.noseTouchStreak++;
-          const now = Date.now();
-          // Require streak of 3 frames to avoid accidental triggers
-          if (state.noseTouchStreak >= 3 && now - state.lastNoseTouchAt > 1500) {
-            state.lastNoseTouchAt = now;
-            handleCommandSuccess('NOSE_TOUCH');
-          }
-        } else {
-          state.noseTouchStreak = 0;
-        }
-      }
-
-      // 4. RAISE HAND
-      if (activeCommand === 'RAISE_HAND') {
-        const nose = landmarks[0];
-        const leftWrist = landmarks[15];
-        const rightWrist = landmarks[16];
-        if (leftWrist.y < nose.y || rightWrist.y < nose.y) {
-          handleCommandSuccess('RAISE_HAND');
-        }
-      }
       ctx.restore();
     });
 
-    // Process Face Detection
-    faceDetection.onResults((results) => {
-      const now = Date.now();
-      const state = detectionStateRef.current;
-      if (results.detections?.length > 0) {
-        state.lastFaceDetectedTime = now;
-        if (state.isAbsent) {
-          state.isAbsent = false;
-          handleFaceReturned();
-        }
-      } else if (now - state.lastFaceDetectedTime > 3000 && !state.isAbsent) {
-        state.isAbsent = true;
-        handleFaceAbsent(now - state.lastFaceDetectedTime);
-      }
-    });
-
     holisticRef.current = holistic;
-    faceDetectionRef.current = faceDetection;
 
+    // Single model processing loop
     const processFrame = async () => {
-      if (!video || video.readyState !== 4) {
-        animationFrameRef.current = requestAnimationFrame(processFrame);
-        return;
+      if (!streamRef.current || !isCameraOnRef.current) return;
+
+      const videoEl = videoRef.current;
+      if (videoEl && videoEl.readyState === 4 && videoEl.videoWidth > 0) {
+        try {
+          await holistic.send({ image: videoEl });
+        } catch (err) {
+          console.error('Holistic error:', err);
+        }
       }
-      await holistic.send({ image: video });
-      await faceDetection.send({ image: video });
+
       animationFrameRef.current = requestAnimationFrame(processFrame);
     };
+
     processFrame();
 
   }, [handleCommandSuccess, handleFaceAbsent, handleFaceReturned]);
@@ -426,41 +649,68 @@ const CommandsWarmUpSession = () => {
   };
 
   const handleVideoEnd = () => {
+    console.log('📹 VIDEO ENDED — Starting camera and conversation');
     startCameraAndConversation();
   };
 
   // --- 5. START SESSION (FIXED WITH DELAY) ---
   const startCameraAndConversation = async () => {
-    if (hasStartedRef.current) return;
+    isCameraOnRef.current = true;
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('🎥 STARTING SESSION');
+    if (hasStartedRef.current) {
+      console.log('  ⚠️  Session already started, returning.');
+      return;
+    }
     hasStartedRef.current = true;
+    console.log('  ✓ hasStartedRef set to true');
     setStatus('active');
+    console.log('  ✓ Status set to: active');
 
     try {
-      // 1. Get Stream
+      console.log('\n  📋 Step 1: Get camera stream...');
       const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: true });
       streamRef.current = stream;
+      console.log('    ✓ Camera stream obtained');
 
-      // 2. Trigger React Render
+      console.log('\n  📋 Step 2: Trigger React render...');
       setIsCameraOn(true);
+      console.log('    ✓ isCameraOn set to true');
 
-      // 3. CRITICAL FIX: Wait 300ms for the <video> tag to appear in the DOM
+      console.log('\n  📋 Step 3: Wait for <video> tag to appear in DOM...');
       await new Promise(resolve => setTimeout(resolve, 300));
+      console.log('    ✓ Waited 300ms');
 
-      // 4. Initialize MediaPipe
+      console.log('\n  📋 Step 4: Initialize MediaPipe...');
       if (videoRef.current) {
+        console.log('    ✓ videoRef ready, initializing camera...');
         await initializeCamera(stream);
       } else {
-        console.log("Video ref not ready, waiting one more time...");
+        console.log('    ⚠️  videoRef not ready, waiting one more time...');
         await new Promise(resolve => setTimeout(resolve, 500));
-        if (videoRef.current) await initializeCamera(stream);
+        if (videoRef.current) {
+          console.log('    ✓ videoRef now ready, initializing camera...');
+          await initializeCamera(stream);
+        }
       }
+
+      console.log('\n  📋 Step 5: Prepare agent config...');
+      const studentName = username || HARDCODED_USERNAME;
+      console.log('    ✓ Student name resolved:', studentName);
 
       const config = {
         agentId: 'agent_4701kadwvc69fkvs5ycwka6p0gr3', // UPDATE WITH YOUR ID
         overrides: {
           agent: {
             prompt: {
-              prompt: `You are Blizz, a super-energetic, funny AI friend. You are conducting an interactive lesson for a child named Explorer.
+              prompt: `You are Blizz, You are conducting an interactive lesson for a child named ${studentName}.
+
+## PERSONALIZATION
+- The student's name is available as the value of the variable ` + "studentName" + ` (and this prompt also interpolates ${username || 'Explorer'}). Always address the student by name when appropriate: use the name in the introduction, during transitions between phases, and when praising or encouraging. If the name is missing, use 'Explorer'.
+
+## IMPORTANT: DO NOT DISCONNECT EARLY
+- Under no circumstances should you call the tool \`endCall\` or otherwise disconnect the call before the lesson has fully completed (i.e., after Phase 4 and the explicit lesson completion sequence).
+- If the student says "bye", "goodbye", "see you", or asks to end the call during the lesson, acknowledge kindly (for example: "I'll be here when you're ready — let's keep going!") or offer a short pause, but DO NOT end the session. Continue with the lesson flow or re-engage the student with a gentle prompt.
 
 ## GLOBAL RULE: THE 2-ATTEMPT LIMIT
 For every question or command, you allow exactly **TWO attempts**:
@@ -469,14 +719,13 @@ For every question or command, you allow exactly **TWO attempts**:
 
 ## AVAILABLE TOOLS:
 1. **changeLessonPhase** - Call with: phase='WARMUP', 'PART_A', 'PART_B', or 'PART_C'
-2. **revealSentence** - Call with: sentenceNumber=1 (for sentence 1), sentenceNumber=2 (for sentence 2), or sentenceNumber=3 (for sentence 3)
-3. **endCall** - Call this ONLY when the lesson is totally finished.
+2. **endCall** - Call this ONLY when the lesson is totally finished.
 
 ## PHASE 0: INTRODUCTION (Setting the Scene)
 **Current Phase:** INTRO
 
 - **Goal:** Introduce yourself and explain the activity.
-- **Say:** "Hi there, Explorer! I am Blizz, your energetic AI friend! Today we are going to learn all about **COMMANDS** and **BOSSY VERBS**! We are going to do a wiggle workout, throw some snowballs, and take a fun quiz. Are you ready to get moving?"
+- **Say:** "Hi there, Explorer! I am Blizz! Today we are going to learn all about **COMMANDS** and **BOSSY VERBS**! We are going to do a wiggle workout, throw some snowballs, and take a fun quiz. Are you ready to get moving?"
 - **Wait for response.**
 
 **HANDLING RESPONSES:**
@@ -537,9 +786,9 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
 
 1. **Setup:**
    - Say: "Great! Now… which one of these is a COMMAND? I'll read each sentence. Listen carefully!"
-   - Say: "One… 'The flowers are very colourful.'" -> CALL TOOL: revealSentence(sentenceNumber=1)
-   - Say: "Two… 'Can you water the flowers?'" -> CALL TOOL: revealSentence(sentenceNumber=2)
-   - Say: "Three… 'Pick a flower for me.'" -> CALL TOOL: revealSentence(sentenceNumber=3)
+   - Say: "One… 'The flowers are very colourful.'"
+   - Say: "Two… 'Can you water the flowers?'"
+   - Say: "Three… 'Pick a flower for me.'"
 
 2. **Question 1 (Find the Sentence):**
    - Say: "Now Explorer… can you tell me the sentence that is the command? Say it out loud."
@@ -573,11 +822,8 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
 
 1. **Setup & Reading:**
    - Say: "One of these is STILL a command. Listen carefully while I read them."
-   - THEN CALL TOOL: revealSentence(sentenceNumber=1)
    - Say: "One… will you help your friend"
-   - THEN CALL TOOL: revealSentence(sentenceNumber=2)
    - Say: "Two… stop right there"
-   - THEN CALL TOOL: revealSentence(sentenceNumber=3)
    - Say: "Three… the sky is turning grey"
 
 2. **Question:**
@@ -588,20 +834,27 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
 
 3. **Follow-Up (Bossy Verb):**
    - Say: "Now tell me the bossy verb in that command."
-   - **CORRECT ("Stop"):** Say: "Exactly! 'Stop' is the bossy verb! You did amazing today! Thanks for playing, bye bye!"
+   - **CORRECT ("Stop"):** Say: "Exactly! 'Stop' is the bossy verb! You did amazing today!"
    - **WRONG (1st):** Say: "Try again… which word is the action word at the very beginning?"
-   - **WRONG (2nd):** Say: "The bossy verb is STOP. You did great today! Thanks for playing, bye bye!"
 
 4. **TERMINATION:**
-   - Only now that the user has finished Phase 4, trigger: `[LESSON_COMPLETE]`
+   -  You did great today! Thanks for playing, bye bye!"
+   - Only now that the user has finished Phase 4, trigger: \`[LESSON_COMPLETE]\`
    - CALL TOOL: "endCall()"
 `,
-              firstMessage: `Hi ${username}! I'm Blizz! Are you ready to play?`
+              firstMessage: `Hi ${studentName}! I'm Blizz! Are you ready to play?`
             }
+            ,
+            studentName: studentName
           }
         }
       };
 
+      console.log('\n  📋 Step 6: Start ElevenLabs session...');
+      console.log('    ✓ Agent ID:', config.agentId);
+      console.log('    ✓ Student name in config:', config.overrides.agent.studentName);
+      console.log('    ✓ First message:', config.overrides.agent.prompt.firstMessage);
+      console.log('═══════════════════════════════════════════════════════════════\n');
       await startSession(config);
 
     } catch (error) {
@@ -642,7 +895,7 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
         className="warmup-background"
         style={{
           backgroundColor: '#4aa0e7ff',
-          backgroundImage: `linear-gradient(to bottom, rgba(74,160,231,1), rgba(255,255,255,1)), url(${snowGif})`,
+          backgroundImage: `url(${snowBackground})`,
           backgroundSize: 'cover',
           backgroundPosition: 'center',
           backgroundRepeat: 'no-repeat',
@@ -703,77 +956,31 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
 
                 <div className="sentence-list" style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
 
-                  {/* SENTENCE 1 */}
-                  <div
-                    className="sentence-item"
-                    style={{
-                      display: 'flex', // Force layout so it takes space
-                      alignItems: 'center',
-                      gap: '15px',
-                      padding: '15px',
-                      borderRadius: '12px',
-                      background: 'rgba(255, 255, 255, 0.9)', // White background for readability
-                      opacity: visibleSentences >= 1 ? 1 : 0, // Fade in
-                      transition: 'opacity 0.5s ease',
-                      transform: visibleSentences >= 1 ? 'translateY(0)' : 'translateY(10px)', // Slight slide-up effect
-                    }}
-                  >
-                    <span className="number-badge" style={{
-                      background: '#FF5722', color: 'white',
-                      width: '35px', height: '35px', display: 'flex',
-                      alignItems: 'center', justifyContent: 'center',
-                      borderRadius: '50%', fontWeight: 'bold'
-                    }}>1</span>
-                    <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>The flowers are very colourful.</p>
-                  </div>
-
-                  {/* SENTENCE 2 */}
-                  <div
-                    className="sentence-item"
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '15px',
-                      padding: '15px',
-                      borderRadius: '12px',
-                      background: 'rgba(255, 255, 255, 0.9)',
-                      opacity: visibleSentences >= 2 ? 1 : 0,
-                      transition: 'opacity 0.5s ease',
-                      transform: visibleSentences >= 2 ? 'translateY(0)' : 'translateY(10px)',
-                    }}
-                  >
-                    <span className="number-badge" style={{
-                      background: '#FF5722', color: 'white',
-                      width: '35px', height: '35px', display: 'flex',
-                      alignItems: 'center', justifyContent: 'center',
-                      borderRadius: '50%', fontWeight: 'bold'
-                    }}>2</span>
-                    <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>Can you water the flowers?</p>
-                  </div>
-
-                  {/* SENTENCE 3 */}
-                  <div
-                    className="sentence-item"
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '15px',
-                      padding: '15px',
-                      borderRadius: '12px',
-                      background: 'rgba(255, 255, 255, 0.9)',
-                      opacity: visibleSentences >= 3 ? 1 : 0,
-                      transition: 'opacity 0.5s ease',
-                      transform: visibleSentences >= 3 ? 'translateY(0)' : 'translateY(10px)',
-                    }}
-                  >
-                    <span className="number-badge" style={{
-                      background: '#FF5722', color: 'white',
-                      width: '35px', height: '35px', display: 'flex',
-                      alignItems: 'center', justifyContent: 'center',
-                      borderRadius: '50%', fontWeight: 'bold'
-                    }}>3</span>
-                    <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>Pick a flower for me.</p>
-                  </div>
+                  {partBSentences.map((text, idx) => (
+                    <div
+                      key={idx}
+                      className="sentence-item"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '15px',
+                        padding: '15px',
+                        borderRadius: '12px',
+                        background: 'rgba(255, 255, 255, 0.95)',
+                        opacity: visibleSentences >= idx + 1 ? 1 : 0,
+                        transition: 'opacity 0.45s ease, transform 0.45s ease',
+                        transform: visibleSentences >= idx + 1 ? 'translateY(0)' : 'translateY(10px)'
+                      }}
+                    >
+                      <span className="number-badge" style={{
+                        background: '#FF5722', color: 'white',
+                        width: '35px', height: '35px', display: 'flex',
+                        alignItems: 'center', justifyContent: 'center',
+                        borderRadius: '50%', fontWeight: 'bold'
+                      }}>{idx + 1}</span>
+                      <p style={{ margin: 0, color: '#333', fontSize: '1.2rem', fontWeight: '500' }}>{text}</p>
+                    </div>
+                  ))}
 
                 </div>
               </div>
@@ -786,7 +993,7 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
 
                 <p className="instruction-sub">Find the COMMAND!</p>
                 <div className="sentence-list" style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '20px' }}>
-                  {['will you help your friend', 'stop right there', 'the sky is turning grey'].map((text, i) => (
+                  {partCSentences.map((text, i) => (
                     <div key={i} className="sentence-item"
                       style={{
                         display: 'flex', alignItems: 'center', gap: '15px', padding: '15px', borderRadius: '12px', background: 'rgba(255, 255, 255, 0.95)',
@@ -808,8 +1015,13 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
             )}
 
             {/* Feedback Overlays */}
-            {commandCompleted && <div className="feedback-overlay success">✅ Great Job!</div>}
-            {faceAbsent && lessonPhase === 'WARMUP' && <div className="feedback-overlay warning">😶 Where did you go?</div>}
+            {commandCompleted && lessonPhase === 'WARMUP' && (
+              <div className="mini-feedback success">✅ Nice!</div>
+            )}
+            {commandCompleted && lessonPhase !== 'WARMUP' && (
+              <div className="feedback-overlay success">✅ Great Job!</div>
+            )}
+            {faceAbsent && lessonPhase === 'WARMUP' && <div className="mini-feedback warning">😶 Where did you go?</div>}
 
           </div>
         </div>
@@ -821,7 +1033,6 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
           <div className="word-display" style={{ backgroundColor: commandCompleted ? '#4CAF50' : '#2196F3' }}>
             {currentCommand}
           </div>
-          <div className="score-display">Score: {score}</div>
         </div>
       )}
 
@@ -850,7 +1061,7 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
             <video
               src={commandsVideo}
               autoPlay
-              controls={false}
+              controls
               onEnded={handleVideoEnd}
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
             />
@@ -891,6 +1102,16 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
         {status === 'active' && (
           <div className="active-container">
             <VoiceAgentUI isSpeaking={isSpeaking} />
+
+            {/* --- NEW CODE: Agent Transcript --- */}
+            <div className="agent-transcript-box">
+              {latestAgentMessage ? (
+                <p className="agent-text">{latestAgentMessage}</p>
+              ) : (
+                <p className="agent-placeholder">...</p>
+              )}
+            </div>
+            {/* ---------------------------------- */}
           </div>
         )}
 
