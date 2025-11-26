@@ -42,6 +42,7 @@ const CommandsWarmUpSession = () => {
   const [isCameraOn, setIsCameraOn] = useState(false);
   const isCameraOnRef = useRef(false);
   const [isFinishing, setIsFinishing] = useState(false);
+  const [showEndButton, setShowEndButton] = useState(false);
 
   // Game Logic State
   const [currentCommand, setCurrentCommand] = useState(null);
@@ -255,7 +256,7 @@ const CommandsWarmUpSession = () => {
       // --- PHYSICAL COMMAND DETECTION (Only in WARMUP) ---
       if (lessonPhase === 'WARMUP') {
         // Wave
-        if (messageText.includes('wave') && (messageText.includes('can you') || messageText.includes('try'))) {
+        if (messageTextLower.includes('wave') && (messageTextLower.includes('can you') || messageTextLower.includes('try'))) {
           if (activeCommandRef.current !== 'WAVE' || commandCompletedRef.current) {
             activeCommandRef.current = 'WAVE';
             commandCompletedRef.current = false;
@@ -264,7 +265,7 @@ const CommandsWarmUpSession = () => {
           }
         }
         // Clap
-        if (messageText.includes('clap') && (messageText.includes('can you') || messageText.includes('try') || messageText.includes('hands'))) {
+        if (messageTextLower.includes('clap') && (messageTextLower.includes('can you') || messageTextLower.includes('try') || messageTextLower.includes('hands'))) {
           if (activeCommandRef.current !== 'CLAP' || commandCompletedRef.current) {
             activeCommandRef.current = 'CLAP';
             commandCompletedRef.current = false;
@@ -274,7 +275,7 @@ const CommandsWarmUpSession = () => {
           }
         }
         // Touch Nose
-        if ((messageText.includes('touch') || messageText.includes('point')) && messageText.includes('nose')) {
+        if ((messageTextLower.includes('touch') || messageTextLower.includes('point')) && messageTextLower.includes('nose')) {
           if (activeCommandRef.current !== 'NOSE_TOUCH' || commandCompletedRef.current) {
             activeCommandRef.current = 'NOSE_TOUCH';
             commandCompletedRef.current = false;
@@ -284,7 +285,7 @@ const CommandsWarmUpSession = () => {
           }
         }
         // Raise Hand
-        if (messageText.includes('raise') && messageText.includes('hand')) {
+        if (messageTextLower.includes('raise') && messageTextLower.includes('hand')) {
           if (activeCommandRef.current !== 'RAISE_HAND' || commandCompletedRef.current) {
             activeCommandRef.current = 'RAISE_HAND';
             commandCompletedRef.current = false;
@@ -304,7 +305,10 @@ const CommandsWarmUpSession = () => {
       setErrorMessage(error.message || 'Conversation error');
       setStatus('error');
     },
-    onDisconnect: () => console.log('🔌 Disconnected')
+    onDisconnect: () => {
+      console.warn('🔌 Disconnected');
+      try { stopCamera(); } catch (e) { console.error('Error stopping camera on disconnect:', e); }
+    }
   });
 
   const { status: convStatus, isSpeaking, startSession, endSession } = conversation;
@@ -868,13 +872,19 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
 
   // --- 6. SESSION COMPLETION ---
   const handleSessionComplete = useCallback(async () => {
-    if (status === 'completed') return;
+    if (status === 'completed') return; // guard: don't run twice
+    console.log('✅ handleSessionComplete triggered. isFinishing:', isFinishing, 'isSpeaking:', isSpeaking);
     setStatus('completed');
     setCurrentCommand(null);
-    stopCamera();
-    if (endSession) await endSession();
-    setTimeout(() => navigate('/dash', { state: { autoPlay: true } }), 2000);
-  }, [status, stopCamera, endSession, navigate]);
+    try { stopCamera(); } catch (e) { console.error('Error stopping camera:', e); }
+    if (endSession) {
+      try { await endSession(); } catch (e) { console.error('Error ending session:', e); }
+    }
+    // Show the End of Activity button after 5 seconds
+    setTimeout(() => {
+      setShowEndButton(true);
+    }, 5000);
+  }, [status, stopCamera, endSession]);
 
   useEffect(() => {
     if (isFinishing && !isSpeaking) {
@@ -1115,7 +1125,20 @@ THEN CALL TOOL: changeLessonPhase(phase='PART_A')
           </div>
         )}
 
-        {status === 'completed' && <div className="status-container"><p>🎉 Lesson Complete!</p></div>}
+        {status === 'completed' && (
+          <div className="status-container">
+            <p>🎉 Lesson Complete!</p>
+            {showEndButton && (
+              <button
+                onClick={() => navigate('/dash')}
+                className="start-btn"
+                style={{ marginTop: '20px' }}
+              >
+                End of Activity
+              </button>
+            )}
+          </div>
+        )}
 
         {status === 'error' && <div className="error-container"><p>{errorMessage}</p><button onClick={skipSession} className="skip-btn">Skip</button></div>}
       </div>
